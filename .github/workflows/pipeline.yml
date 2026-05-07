@@ -1,0 +1,92 @@
+name: Electricity Forecast Pipeline
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      force_train:
+        description: 'Force model retraining'
+        required: false
+        default: 'false'
+      skip_email:
+        description: 'Skip email delivery'
+        required: false
+        default: 'false'
+
+jobs:
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: pytest tests/ -v --tb=short
+
+  pipeline:
+    name: Forecast Pipeline
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create directories
+        run: mkdir -p data/raw data/processed data/reports models logs
+
+      - name: Restore cached model
+        uses: actions/cache@v4
+        with:
+          path: models/
+          key: model-${{ runner.os }}-${{ hashFiles('src/ml/**') }}
+          restore-keys: model-${{ runner.os }}-
+
+      - name: Restore database
+        uses: actions/cache@v4
+        with:
+          path: data/electricity.db
+          key: db-${{ runner.os }}-${{ github.run_number }}
+          restore-keys: db-${{ runner.os }}-
+
+      - name: Run pipeline
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+          EMAIL_RECEIVER: ${{ secrets.EMAIL_RECEIVER }}
+          DATABASE_URL: sqlite:///data/electricity.db
+          MODEL_PATH: models/
+          LOG_LEVEL: INFO
+        run: |
+          ARGS=""
+          [ "${{ github.event.inputs.force_train }}" = "true" ] && ARGS="$ARGS --force-train"
+          [ "${{ github.event.inputs.skip_email }}" = "true" ] && ARGS="$ARGS --skip-email"
+          python -m src.main $ARGS
+
+      - name: Upload reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reports-${{ github.run_number }}
+          path: |
+            data/reports/
+            logs/
+          retention-days: 30
+
+      - name: Upload model
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: model-${{ github.run_number }}
+          path: models/
+          retention-days: 90
